@@ -656,6 +656,27 @@ Tensor _unsafe_index(const Tensor& self, const torch::List<c10::optional<Tensor>
   return at::index(self, indices);
 }
 
+Tensor _masked_index(const Tensor& self, const Tensor& mask, const torch::List<c10::optional<Tensor>>& indices, const Scalar& other) {
+  torch::List<c10::optional<Tensor>> clamped_indices;
+  clamped_indices.reserve(indices.size());
+
+  auto sizes = self.sizes();
+  for (auto i : c10::irange(indices.size())) {
+    auto index = indices.get(i);
+    if (!index.has_value()) {
+      clamped_indices.push_back(index);
+    } else {
+      auto dtype = index->scalar_type();
+      TORCH_CHECK(dtype == kLong || dtype == kInt,
+                  "_masked_index found unexpected index type ", dtype);
+      clamped_indices.push_back(at::clamp(*index, -sizes[i], sizes[i] - 1));
+    }
+  }
+  auto result = at::index(self, clamped_indices);
+  result.masked_fill_(at::logical_not(mask), other);
+  return result;
+}
+
 Tensor & put_(Tensor & self, const Tensor& index, const Tensor & source, const bool accumulate) {
   // See note [Writing Nondeterministic Operations]
   // Nondeterministic when index contains duplicate entries and we do not accumulate
