@@ -524,14 +524,18 @@ test_inductor_torchbench_cpu_smoketest_perf(){
   mkdir -p "$TEST_REPORTS_DIR"
 
   #set jemalloc
-  local JEMALLOC_LIB="$(dirname $(which python))/../lib/libjemalloc.so"
-  export LD_PRELOAD="$JEMALLOC_LIB"
+  local JEMALLOC_LIB
+  JEMALLOC_LIB="$(dirname $(which python))/../lib/libjemalloc.so"
+  local IOMP_LIB
+  IOMP_LIB="$(dirname $(which python))/../lib/libiomp5.so"
+  export LD_PRELOAD="$JEMALLOC_LIB":"$IOMP_LIB"
   export MALLOC_CONF="oversize_threshold:1,background_thread:true,metadata_thp:auto,dirty_decay_ms:-1,muzzy_decay_ms:-1"
   export KMP_AFFINITY=granularity=fine,compact,1,0
   export KMP_BLOCKTIME=1
-  local CORES=$(lscpu | grep Core | awk '{print $4}')
+  local CORES
+  CORES=$(lscpu | grep Core | awk '{print $4}')
   export OMP_NUM_THREADS=$CORES
-  local end_core=$(( $CORES-1 ))
+  local end_core=$(( CORES-1 ))
 
   MODELS_SPEEDUP_TARGET=benchmarks/dynamo/expected_ci_speedup_inductor_torchbench_cpu.csv
 
@@ -540,13 +544,13 @@ test_inductor_torchbench_cpu_smoketest_perf(){
     local model_name=${model_cfg[0]}
     local data_type=${model_cfg[1]}
     local speedup_target=${model_cfg[4]}
-    local model_args="$model_name"
+    local model_args=""
     if [[ ${model_cfg[2]} == "dynamic" ]]; then model_args+=" --dynamic-shapes --dynamic-batch-only"; fi
     if [[ ${model_cfg[3]} == "cpp" ]]; then model_args+=" --cpp-wrapper"; fi
     local output_name="$TEST_REPORTS_DIR/inductor_inference_${model_cfg[0]}_${model_cfg[1]}_${model_cfg[2]}_${model_cfg[3]}_cpu_smoketest.csv"
 
     numactl -C 0-"$end_core" -m 0 python benchmarks/dynamo/torchbench.py \
-      --inference --performance --"$data_type" -dcpu -n50 --only "$model_args" \
+      --inference --performance --"$data_type" -dcpu -n50 --only "$model_name" $model_args \
       --freezing --timeout 9000 --backend=inductor --output "$output_name"
     # The threshold value needs to be actively maintained to make this check useful.
     python benchmarks/dynamo/check_perf_csv.py -f "$output_name" -t "$speedup_target"
