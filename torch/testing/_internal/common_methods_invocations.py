@@ -11719,13 +11719,6 @@ op_db: List[OpInfo] = [
                DecorateInfo(unittest.skip("Skipped!"), 'TestBwdGradients', 'test_fn_gradgrad'),
                # ValueError: Sparse output is not supported at gradcheck yet. Please call to_dense(masked_grad=...) ...
                DecorateInfo(unittest.skip("Skipped!"), 'TestFwdGradients', 'test_forward_mode_AD'),
-               # RuntimeError: ROCm 6.0 failing on few of sparse addmm for few data types
-               DecorateInfo(unittest.skip("Skipped!"), 'TestFakeTensor', 'test_fake_crossref_backward_no_amp',
-                                     active_if=TEST_WITH_ROCM, device_type='cuda', dtypes=[torch.float32]),
-               DecorateInfo(unittest.skip("Skipped!"), 'TestDecomp', 'test_comprehensive',
-                                     active_if=TEST_WITH_ROCM, device_type='cuda', dtypes=[torch.float32, torch.complex128]),
-               DecorateInfo(unittest.skip("Skipped!"), 'TestSchemaCheckModeOpInfo', 'test_schema_correctness',
-                                     active_if=TEST_WITH_ROCM, device_type='cuda', dtypes=[torch.float64]),
            )),
     OpInfo('sparse.mm',
            dtypes=floating_types_and(torch.bfloat16),
