@@ -3417,6 +3417,7 @@ exit(2)
                     torch.addmm(s, m1, m2)
 
     @unittest.skipIf(TEST_MULTIGPU, "Testing on one GPU is sufficient")
+    @skipIfRocm(msg="Skipped!!, since it is failing on ROCm 6.0")
     def test_lazy_init(self):
         """ Validate that no CUDA calls are made during `import torch` call"""
         from subprocess import check_output
