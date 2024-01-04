@@ -215,6 +215,7 @@ class ConstDictVariable(VariableTracker):
         if name == "__getitem__":
             assert len(args) == 1
             return self.getitem_const(args[0])
+
         elif name == "items":
             assert not (args or kwargs)
             return TupleVariable(
@@ -284,6 +285,13 @@ class ConstDictVariable(VariableTracker):
         return [x.vt for x in self.items.keys()]
 
 
+def is_valid_global_ref_key(key):
+    if istensor(key):
+        return True
+    else:
+        return isinstance(key, torch.nn.Module)
+
+
 class DefaultDictVariable(ConstDictVariable):
     def __init__(self, items, user_cls, default_factory=None, **kwargs):
         super().__init__(items, user_cls, **kwargs)
@@ -348,6 +356,7 @@ class SetVariable(VariableTracker):
 
     def __init__(
         self,
+        tx,
         items: List[VariableTracker],
         **kwargs,
     ):
@@ -357,7 +366,8 @@ class SetVariable(VariableTracker):
         assert all(isinstance(x, VariableTracker) for x in items)
 
         self.items = []
-        self._add(items)
+        self._add(tx, items)
+        self.tx = tx
 
     def as_proxy(self):
         return [x.as_proxy() for x in self.items]
@@ -373,7 +383,7 @@ class SetVariable(VariableTracker):
         ] + create_call_function(1, True)
 
     # Note - this is only used for producing a set
-    def _as_set_element(self, vt):
+    def _as_set_element(self, tx, vt):
         from .base import VariableTracker
         from .misc import MethodWrapperVariable
         from .tensor import TensorVariable
@@ -391,21 +401,24 @@ class SetVariable(VariableTracker):
             return SetVariable.SetElement(vt, vt.value)
         if isinstance(vt, MethodWrapperVariable):
             return SetVariable.SetElement(vt, vt.as_python_constant())
+        if isinstance(vt, variables.UserDefinedObjectVariable):
+            return SetVariable.SetElement(vt, vt.value)
+        if isinstance(vt, variables.NNModuleVariable):
+            return SetVariable.SetElement(vt, tx.output.get_submodule(vt.module_key))
 
         unimplemented(f"Sets with {type(vt)} NYI")
 
-    @property
-    def _underlying_items(self):
+    def _underlying_items(self, tx):
         underlying_items = set()
         for current_item in self.items:
             assert (
                 current_item not in underlying_items
             ), "Items modeling set invariant violated"
-            underlying_items.add(self._as_set_element(current_item))
+            underlying_items.add(self._as_set_element(tx, current_item))
         return underlying_items
 
-    def _add(self, item):
-        underlying_items = self._underlying_items
+    def _add(self, tx, item):
+        underlying_items = self._underlying_items(tx)
 
         if isinstance(item, (list, set)):
             items_to_add = item
@@ -413,7 +426,7 @@ class SetVariable(VariableTracker):
             items_to_add = [item]
 
         for item_to_add in items_to_add:
-            set_element = self._as_set_element(item_to_add)
+            set_element = self._as_set_element(tx, item_to_add)
             if set_element not in underlying_items:
                 underlying_items.add(set_element)
                 self.items.append(set_element.vt)
@@ -440,7 +453,7 @@ class SetVariable(VariableTracker):
             assert not kwargs
             item = args[0]
             tx.output.side_effects.mutation(self)
-            self._add(item)
+            self._add(tx, item)
             return ConstantVariable.create(None)
         elif name == "pop" and self.mutable_local:
             assert not kwargs
@@ -456,7 +469,7 @@ class SetVariable(VariableTracker):
         else:
             return super().call_method(tx, name, args, kwargs)
 
-    def getitem_const(self, arg: VariableTracker):
+    def getitem_const(self, tx, arg: VariableTracker):
         raise RuntimeError("Illegal to getitem on a set")
 
     def as_python_constant(self):
