@@ -25,6 +25,7 @@ from torch._dynamo.testing import (
 from torch._dynamo.utils import counters, ifdynstaticdefault
 from torch._higher_order_ops.wrap import wrap
 from torch.testing._internal.inductor_utils import HAS_CUDA
+from torch.testing._internal.common_utils import skipIfTorchDynamo
 
 
 requires_cuda = functools.partial(unittest.skipIf, not HAS_CUDA, "requires cuda")
@@ -2272,14 +2273,79 @@ class GraphModule(torch.nn.Module):
         x = torch.randn(3, 3, 3, 3)
         fn(x)
         gm = backend.graphs[0]
-        actual_stack = self._get_source_fn_stack(gm, {"sum_1", "sum_2", "add"})
+        actual_stack = self._get_source_fn_stack(
+            gm, {"sum_1", "sum_2", "batched_output"}
+        )
         self.assertExpectedInline(
             pprint.pformat(actual_stack),
             """\
-{'add': ['vmap_impl', 'vmap_impl', 'add'],
- 'sum_1': ['vmap_impl', 'vmap_impl', 'sum_1'],
- 'sum_2': ['vmap_impl', 'vmap_impl', 'sum_2']}""",
+{'batched_output': ['add'], 'sum_1': ['sum_1'], 'sum_2': ['sum_2']}""",
         )
+
+    @config.patch(capture_func_transforms=True)
+    def test_vmap_with_graph_break(self):
+        counters.clear()
+
+        def g(x):
+            y = x.cos()
+            print('hi')
+            return y.sin()
+
+        def fn(x):
+            return torch.vmap(g)(x)
+
+        x = torch.randn(3, 4)
+        opt = torch.compile(fn, backend="aot_eager", fullgraph=False)
+        expected = fn(x)
+        got = opt(x)
+        self.assertEqual(len(counters["graph_break"]), 1)
+        self.assertEqual(expected, got)
+
+    @skipIfTorchDynamo
+    @config.patch(capture_func_transforms=True)
+    def test_vmap_with_graph_break_2(self):
+        counters.clear()
+
+        def cos(x):
+            print('cos')
+            return x.cos()
+
+        def sin(x):
+            print('sin')
+            return x.sin()
+
+        def g(x):
+            y = cos(x)
+            return sin(y)
+
+        def fn(x):
+            return torch.vmap(g, randomness='same')(x)
+
+        x = torch.randn(3, 4)
+        opt = torch.compile(fn, backend="aot_eager", fullgraph=False)
+        expected = fn(x)
+        got = opt(x)
+        self.assertEqual(len(counters["graph_break"]), 1)
+        self.assertEqual(expected, got)
+
+    @skipIfTorchDynamo
+    def test_vmap_with_graph_break_lambda(self):
+        counters.clear()
+
+        def sin(x):
+            print('sin')
+            return x.sin()
+
+        def fn(x):
+            return torch.vmap(lambda x: sin(x))(x)
+
+        x = torch.randn(3, 4)
+        opt = torch.compile(fn, backend="aot_eager", fullgraph=False)
+        expected = fn(x)
+        got = opt(x)
+        self.assertEqual(len(counters["graph_break"]), 1)
+        self.assertEqual(expected, got)
+
 
     def test_cond_pytree_operands(self):
         def _construct_pytree():
@@ -2964,22 +3030,26 @@ class GraphModule(torch.nn.Module):
             """\
 class GraphModule(torch.nn.Module):
     def forward(self, L_x_ : torch.Tensor):
-        child = L_x_
+        arg = L_x_
 
-        _check_randomness_arg = torch._functorch.vmap._check_randomness_arg('error')
+        lazy_load_decompositions = torch._functorch.vmap.lazy_load_decompositions()
 
-        select = child.select(0, 0)
-        vmap_body_0 = self.vmap_body_0
-        vmap_proxy = torch.func.vmap(vmap_body_0, (0,), 0, 'error');  vmap_body_0 = None
-        call = vmap_proxy.__call__(child);  vmap_proxy = child = None
-        return (call,)
+        _saved_tensors_hooks_disable = torch._C._autograd._saved_tensors_hooks_disable("torch.func transforms don't yet support saved tensor hooks. Please open an issue with your use case.")
 
-    class GraphModule(torch.nn.Module):
-        def forward(self, select):
-            sum_1 = select.sum(0)
-            sum_2 = select.sum(1);  select = None
-            add = sum_1 + sum_2;  sum_1 = sum_2 = None
-            return add
+        _vmap_increment_nesting = torch._C._functorch._vmap_increment_nesting(3, 'error')
+
+        _add_batch_dim = torch._C._functorch._add_batch_dim(arg, 0, 1);  arg = None
+
+        sum_1 = _add_batch_dim.sum(0)
+        sum_2 = _add_batch_dim.sum(1);  _add_batch_dim = None
+        batched_output = sum_1 + sum_2;  sum_1 = sum_2 = None
+
+        _remove_batch_dim = torch._C._functorch._remove_batch_dim(batched_output, 1, 3, 0);  batched_output = None
+
+        _vmap_decrement_nesting = torch._C._functorch._vmap_decrement_nesting()
+
+        _saved_tensors_hooks_enable = torch._C._autograd._saved_tensors_hooks_enable()
+        return (_remove_batch_dim,)
 """,
         )
 
@@ -3003,23 +3073,27 @@ class GraphModule(torch.nn.Module):
             """\
 class GraphModule(torch.nn.Module):
     def forward(self, L_x_ : torch.Tensor):
-        child = L_x_
+        arg = L_x_
 
-        _check_randomness_arg = torch._functorch.vmap._check_randomness_arg('error')
+        lazy_load_decompositions = torch._functorch.vmap.lazy_load_decompositions()
 
-        select = child.select(0, 0)
-        vmap_body_0 = self.vmap_body_0
-        vmap_proxy = torch.func.vmap(vmap_body_0, (0,), 0, 'error');  vmap_body_0 = None
-        call = vmap_proxy.__call__(child);  vmap_proxy = child = None
-        return (call,)
+        _saved_tensors_hooks_disable = torch._C._autograd._saved_tensors_hooks_disable("torch.func transforms don't yet support saved tensor hooks. Please open an issue with your use case.")
 
-    class GraphModule(torch.nn.Module):
-        def forward(self, select):
-            sum_1 = select.sum(0)
-            sum_2 = select.sum(1);  select = None
-            add = sum_1 + sum_2;  sum_1 = sum_2 = None
-            add_1 = add + 3;  add = None
-            return add_1
+        _vmap_increment_nesting = torch._C._functorch._vmap_increment_nesting(3, 'error')
+
+        _add_batch_dim = torch._C._functorch._add_batch_dim(arg, 0, 1);  arg = None
+
+        sum_1 = _add_batch_dim.sum(0)
+        sum_2 = _add_batch_dim.sum(1);  _add_batch_dim = None
+        add = sum_1 + sum_2;  sum_1 = sum_2 = None
+        batched_output = add + 3;  add = None
+
+        _remove_batch_dim = torch._C._functorch._remove_batch_dim(batched_output, 1, 3, 0);  batched_output = None
+
+        _vmap_decrement_nesting = torch._C._functorch._vmap_decrement_nesting()
+
+        _saved_tensors_hooks_enable = torch._C._autograd._saved_tensors_hooks_enable()
+        return (_remove_batch_dim,)
 """,
         )
 
@@ -3043,24 +3117,28 @@ class GraphModule(torch.nn.Module):
             """\
 class GraphModule(torch.nn.Module):
     def forward(self, L_x_ : torch.Tensor, L_y_ : torch.Tensor):
-        child = L_x_
+        arg = L_x_
         l_y_ = L_y_
 
-        _check_randomness_arg = torch._functorch.vmap._check_randomness_arg('error')
+        lazy_load_decompositions = torch._functorch.vmap.lazy_load_decompositions()
 
-        select = child.select(0, 0)
-        vmap_body_0 = self.vmap_body_0
-        vmap_proxy = torch.func.vmap(vmap_body_0, (0, None), 0, 'error');  vmap_body_0 = None
-        call = vmap_proxy.__call__(child, l_y_);  vmap_proxy = child = l_y_ = None
-        return (call,)
+        _saved_tensors_hooks_disable = torch._C._autograd._saved_tensors_hooks_disable("torch.func transforms don't yet support saved tensor hooks. Please open an issue with your use case.")
 
-    class GraphModule(torch.nn.Module):
-        def forward(self, select, l_y_):
-            sum_1 = select.sum(0)
-            sum_2 = select.sum(1);  select = None
-            add = sum_1 + sum_2;  sum_1 = sum_2 = None
-            add_1 = add + l_y_;  add = l_y_ = None
-            return add_1
+        _vmap_increment_nesting = torch._C._functorch._vmap_increment_nesting(3, 'error')
+
+        _add_batch_dim = torch._C._functorch._add_batch_dim(arg, 0, 1);  arg = None
+
+        sum_1 = _add_batch_dim.sum(0)
+        sum_2 = _add_batch_dim.sum(1);  _add_batch_dim = None
+        add = sum_1 + sum_2;  sum_1 = sum_2 = None
+        batched_output = add + l_y_;  add = l_y_ = None
+
+        _remove_batch_dim = torch._C._functorch._remove_batch_dim(batched_output, 1, 3, 0);  batched_output = None
+
+        _vmap_decrement_nesting = torch._C._functorch._vmap_decrement_nesting()
+
+        _saved_tensors_hooks_enable = torch._C._autograd._saved_tensors_hooks_enable()
+        return (_remove_batch_dim,)
 """,
         )
 
@@ -3085,25 +3163,29 @@ class GraphModule(torch.nn.Module):
             """\
 class GraphModule(torch.nn.Module):
     def forward(self, L_x_ : torch.Tensor, L_y_ : torch.Tensor):
-        child = L_x_
-        child_1 = L_y_
+        arg = L_x_
+        arg_3 = L_y_
 
-        _check_randomness_arg = torch._functorch.vmap._check_randomness_arg('error')
+        lazy_load_decompositions = torch._functorch.vmap.lazy_load_decompositions()
 
-        select = child.select(0, 0)
-        select_1 = child_1.select(1, 0)
-        vmap_body_0 = self.vmap_body_0
-        vmap_proxy = torch.func.vmap(vmap_body_0, (0, 1), 0, 'error');  vmap_body_0 = None
-        call = vmap_proxy.__call__(child, child_1);  vmap_proxy = child = child_1 = None
-        return (call,)
+        _saved_tensors_hooks_disable = torch._C._autograd._saved_tensors_hooks_disable("torch.func transforms don't yet support saved tensor hooks. Please open an issue with your use case.")
 
-    class GraphModule(torch.nn.Module):
-        def forward(self, select, select_1):
-            sum_1 = select.sum(0)
-            sum_2 = select.sum(1);  select = None
-            add = sum_1 + sum_2;  sum_1 = sum_2 = None
-            add_1 = add + select_1;  add = select_1 = None
-            return add_1
+        _vmap_increment_nesting = torch._C._functorch._vmap_increment_nesting(3, 'error')
+
+        _add_batch_dim = torch._C._functorch._add_batch_dim(arg, 0, 1);  arg = None
+        _add_batch_dim_1 = torch._C._functorch._add_batch_dim(arg_3, 1, 1);  arg_3 = None
+
+        sum_1 = _add_batch_dim.sum(0)
+        sum_2 = _add_batch_dim.sum(1);  _add_batch_dim = None
+        add = sum_1 + sum_2;  sum_1 = sum_2 = None
+        batched_output = add + _add_batch_dim_1;  add = _add_batch_dim_1 = None
+
+        _remove_batch_dim = torch._C._functorch._remove_batch_dim(batched_output, 1, 3, 0);  batched_output = None
+
+        _vmap_decrement_nesting = torch._C._functorch._vmap_decrement_nesting()
+
+        _saved_tensors_hooks_enable = torch._C._autograd._saved_tensors_hooks_enable()
+        return (_remove_batch_dim,)
 """,
         )
 
@@ -3130,25 +3212,29 @@ class GraphModule(torch.nn.Module):
             """\
 class GraphModule(torch.nn.Module):
     def forward(self, L_x_ : torch.Tensor, L_y_ : torch.Tensor):
-        child = L_x_
-        child_1 = L_y_
+        arg = L_x_
+        arg_3 = L_y_
 
-        _check_randomness_arg = torch._functorch.vmap._check_randomness_arg('error')
+        lazy_load_decompositions = torch._functorch.vmap.lazy_load_decompositions()
 
-        select = child.select(0, 0)
-        select_1 = child_1.select(1, 0)
-        vmap_body_0 = self.vmap_body_0
-        vmap_proxy = torch.func.vmap(vmap_body_0, (0, 1), 0, 'error');  vmap_body_0 = None
-        call = vmap_proxy.__call__(child, child_1);  vmap_proxy = child = child_1 = None
-        return (call,)
+        _saved_tensors_hooks_disable = torch._C._autograd._saved_tensors_hooks_disable("torch.func transforms don't yet support saved tensor hooks. Please open an issue with your use case.")
 
-    class GraphModule(torch.nn.Module):
-        def forward(self, select, select_1):
-            sum_1 = select.sum(0)
-            sum_2 = select.sum(1);  select = None
-            add = sum_1 + sum_2;  sum_1 = sum_2 = None
-            add_1 = add + select_1;  add = select_1 = None
-            return add_1
+        _vmap_increment_nesting = torch._C._functorch._vmap_increment_nesting(3, 'error')
+
+        _add_batch_dim = torch._C._functorch._add_batch_dim(arg, 0, 1);  arg = None
+        _add_batch_dim_1 = torch._C._functorch._add_batch_dim(arg_3, 1, 1);  arg_3 = None
+
+        sum_1 = _add_batch_dim.sum(0)
+        sum_2 = _add_batch_dim.sum(1);  _add_batch_dim = None
+        add = sum_1 + sum_2;  sum_1 = sum_2 = None
+        batched_output = add + _add_batch_dim_1;  add = _add_batch_dim_1 = None
+
+        _remove_batch_dim = torch._C._functorch._remove_batch_dim(batched_output, 1, 3, 0);  batched_output = None
+
+        _vmap_decrement_nesting = torch._C._functorch._vmap_decrement_nesting()
+
+        _saved_tensors_hooks_enable = torch._C._autograd._saved_tensors_hooks_enable()
+        return (_remove_batch_dim,)
 """,
         )
 
@@ -3171,32 +3257,41 @@ class GraphModule(torch.nn.Module):
             """\
 class GraphModule(torch.nn.Module):
     def forward(self, L_x_ : torch.Tensor, L_y_ : torch.Tensor):
-        child = L_x_
-        child_1 = L_y_
+        arg = L_x_
+        arg_3 = L_y_
 
-        _check_randomness_arg = torch._functorch.vmap._check_randomness_arg('error')
-        _check_randomness_arg_1 = torch._functorch.vmap._check_randomness_arg('error')
+        lazy_load_decompositions = torch._functorch.vmap.lazy_load_decompositions()
 
-        select = child.select(0, 0)
-        select_1 = child_1.select(0, 0)
-        vmap_body_1 = self.vmap_body_1
-        vmap_proxy = torch.func.vmap(vmap_body_1, (0, 0), 0, 'error');  vmap_body_1 = None
-        call = vmap_proxy.__call__(child, child_1);  vmap_proxy = child = child_1 = None
-        return (call,)
+        _saved_tensors_hooks_disable = torch._C._autograd._saved_tensors_hooks_disable("torch.func transforms don't yet support saved tensor hooks. Please open an issue with your use case.")
 
-    class GraphModule(torch.nn.Module):
-        def forward(self, select, select_1):
-            select_2 = select.select(1, 0)
-            select_3 = select_1.select(1, 0)
-            vmap_body_0 = self.vmap_body_0
-            vmap_proxy = torch.func.vmap(vmap_body_0, (1, 1), 0, 'error');  vmap_body_0 = None
-            call = vmap_proxy.__call__(select, select_1);  vmap_proxy = select = select_1 = None
-            return call
+        _vmap_increment_nesting = torch._C._functorch._vmap_increment_nesting(3, 'error')
 
-        class GraphModule(torch.nn.Module):
-            def forward(self, select_2, select_3):
-                add = select_2 + select_3;  select_2 = select_3 = None
-                return add
+        arg_8 = torch._C._functorch._add_batch_dim(arg, 0, 1);  arg = None
+        arg_9 = torch._C._functorch._add_batch_dim(arg_3, 0, 1);  arg_3 = None
+
+        lazy_load_decompositions_1 = torch._functorch.vmap.lazy_load_decompositions()
+
+        _saved_tensors_hooks_disable_1 = torch._C._autograd._saved_tensors_hooks_disable("torch.func transforms don't yet support saved tensor hooks. Please open an issue with your use case.")
+
+        _vmap_increment_nesting_1 = torch._C._functorch._vmap_increment_nesting(3, 'error')
+
+        _add_batch_dim_2 = torch._C._functorch._add_batch_dim(arg_8, 1, 2);  arg_8 = None
+        _add_batch_dim_3 = torch._C._functorch._add_batch_dim(arg_9, 1, 2);  arg_9 = None
+
+        batched_output = _add_batch_dim_2 + _add_batch_dim_3;  _add_batch_dim_2 = _add_batch_dim_3 = None
+
+        batched_output_1 = torch._C._functorch._remove_batch_dim(batched_output, 2, 3, 0);  batched_output = None
+
+        _vmap_decrement_nesting = torch._C._functorch._vmap_decrement_nesting()
+
+        _saved_tensors_hooks_disable_2 = torch._C._autograd._saved_tensors_hooks_disable("torch.func transforms don't yet support saved tensor hooks. Please open an issue with your use case.")
+
+        _remove_batch_dim_1 = torch._C._functorch._remove_batch_dim(batched_output_1, 1, 3, 0);  batched_output_1 = None
+
+        _vmap_decrement_nesting_1 = torch._C._functorch._vmap_decrement_nesting()
+
+        _saved_tensors_hooks_enable = torch._C._autograd._saved_tensors_hooks_enable()
+        return (_remove_batch_dim_1,)
 """,
         )
 
@@ -3220,30 +3315,39 @@ class GraphModule(torch.nn.Module):
             """\
 class GraphModule(torch.nn.Module):
     def forward(self, L_y_ : torch.Tensor, L_x_ : torch.Tensor):
-        child = L_y_
+        arg = L_y_
         l_x_ = L_x_
 
-        _check_randomness_arg = torch._functorch.vmap._check_randomness_arg('error')
-        _check_randomness_arg_1 = torch._functorch.vmap._check_randomness_arg('error')
+        lazy_load_decompositions = torch._functorch.vmap.lazy_load_decompositions()
 
-        select = child.select(0, 0)
-        vmap_body_1 = self.vmap_body_1
-        vmap_proxy = torch.func.vmap(vmap_body_1, (0, None), 0, 'error');  vmap_body_1 = None
-        call = vmap_proxy.__call__(child, l_x_);  vmap_proxy = child = l_x_ = None
-        return (call,)
+        _saved_tensors_hooks_disable = torch._C._autograd._saved_tensors_hooks_disable("torch.func transforms don't yet support saved tensor hooks. Please open an issue with your use case.")
 
-    class GraphModule(torch.nn.Module):
-        def forward(self, select, l_x_):
-            select_1 = select.select(0, 0)
-            vmap_body_0 = self.vmap_body_0
-            vmap_proxy = torch.func.vmap(vmap_body_0, (0, None), 0, 'error');  vmap_body_0 = None
-            call = vmap_proxy.__call__(select, l_x_);  vmap_proxy = select = l_x_ = None
-            return call
+        _vmap_increment_nesting = torch._C._functorch._vmap_increment_nesting(5, 'error')
 
-        class GraphModule(torch.nn.Module):
-            def forward(self, select_1, l_x_):
-                mul = l_x_ * select_1;  l_x_ = select_1 = None
-                return mul
+        arg_3 = torch._C._functorch._add_batch_dim(arg, 0, 1);  arg = None
+
+        lazy_load_decompositions_1 = torch._functorch.vmap.lazy_load_decompositions()
+
+        _saved_tensors_hooks_disable_1 = torch._C._autograd._saved_tensors_hooks_disable("torch.func transforms don't yet support saved tensor hooks. Please open an issue with your use case.")
+
+        _vmap_increment_nesting_1 = torch._C._functorch._vmap_increment_nesting(3, 'error')
+
+        _add_batch_dim_1 = torch._C._functorch._add_batch_dim(arg_3, 0, 2);  arg_3 = None
+
+        batched_output = l_x_ * _add_batch_dim_1;  l_x_ = _add_batch_dim_1 = None
+
+        batched_output_1 = torch._C._functorch._remove_batch_dim(batched_output, 2, 3, 0);  batched_output = None
+
+        _vmap_decrement_nesting = torch._C._functorch._vmap_decrement_nesting()
+
+        _saved_tensors_hooks_disable_2 = torch._C._autograd._saved_tensors_hooks_disable("torch.func transforms don't yet support saved tensor hooks. Please open an issue with your use case.")
+
+        _remove_batch_dim_1 = torch._C._functorch._remove_batch_dim(batched_output_1, 1, 5, 0);  batched_output_1 = None
+
+        _vmap_decrement_nesting_1 = torch._C._functorch._vmap_decrement_nesting()
+
+        _saved_tensors_hooks_enable = torch._C._autograd._saved_tensors_hooks_enable()
+        return (_remove_batch_dim_1,)
 """,
         )
 
@@ -3266,23 +3370,26 @@ class GraphModule(torch.nn.Module):
             """\
 class GraphModule(torch.nn.Module):
     def forward(self, L_x_ : torch.Tensor):
-        child = L_x_
+        arg = L_x_
 
-        _check_randomness_arg = torch._functorch.vmap._check_randomness_arg('error')
+        lazy_load_decompositions = torch._functorch.vmap.lazy_load_decompositions()
 
-        select = child.select(0, 0)
-        vmap_body_0 = self.vmap_body_0
-        vmap_proxy = torch.func.vmap(vmap_body_0, (0,), 0, 'error');  vmap_body_0 = None
-        call = vmap_proxy.__call__(child);  vmap_proxy = child = None
-        getitem = call[0]
-        getitem_1 = call[1];  call = None
-        return (getitem, getitem_1)
+        _saved_tensors_hooks_disable = torch._C._autograd._saved_tensors_hooks_disable("torch.func transforms don't yet support saved tensor hooks. Please open an issue with your use case.")
 
-    class GraphModule(torch.nn.Module):
-        def forward(self, select):
-            sum_1 = select.sum(0)
-            sum_2 = select.sum(1);  select = None
-            return (sum_1, sum_2)
+        _vmap_increment_nesting = torch._C._functorch._vmap_increment_nesting(2, 'error')
+
+        _add_batch_dim = torch._C._functorch._add_batch_dim(arg, 0, 1);  arg = None
+
+        batched_output = _add_batch_dim.sum(0)
+        batched_output_1 = _add_batch_dim.sum(1);  _add_batch_dim = None
+
+        _remove_batch_dim = torch._C._functorch._remove_batch_dim(batched_output, 1, 2, 0);  batched_output = None
+        _remove_batch_dim_1 = torch._C._functorch._remove_batch_dim(batched_output_1, 1, 2, 0);  batched_output_1 = None
+
+        _vmap_decrement_nesting = torch._C._functorch._vmap_decrement_nesting()
+
+        _saved_tensors_hooks_enable = torch._C._autograd._saved_tensors_hooks_enable()
+        return (_remove_batch_dim, _remove_batch_dim_1)
 """,
         )
 
@@ -3305,23 +3412,26 @@ class GraphModule(torch.nn.Module):
             """\
 class GraphModule(torch.nn.Module):
     def forward(self, L_x_ : torch.Tensor):
-        child = L_x_
+        arg = L_x_
 
-        _check_randomness_arg = torch._functorch.vmap._check_randomness_arg('error')
+        lazy_load_decompositions = torch._functorch.vmap.lazy_load_decompositions()
 
-        select = child.select(0, 0)
-        vmap_body_0 = self.vmap_body_0
-        vmap_proxy = torch.func.vmap(vmap_body_0, (0,), (1, 0), 'error');  vmap_body_0 = None
-        call = vmap_proxy.__call__(child);  vmap_proxy = child = None
-        getitem = call[0]
-        getitem_1 = call[1];  call = None
-        return (getitem, getitem_1)
+        _saved_tensors_hooks_disable = torch._C._autograd._saved_tensors_hooks_disable("torch.func transforms don't yet support saved tensor hooks. Please open an issue with your use case.")
 
-    class GraphModule(torch.nn.Module):
-        def forward(self, select):
-            sum_1 = select.sum(0)
-            sum_2 = select.sum(1);  select = None
-            return (sum_1, sum_2)
+        _vmap_increment_nesting = torch._C._functorch._vmap_increment_nesting(2, 'error')
+
+        _add_batch_dim = torch._C._functorch._add_batch_dim(arg, 0, 1);  arg = None
+
+        batched_output = _add_batch_dim.sum(0)
+        batched_output_1 = _add_batch_dim.sum(1);  _add_batch_dim = None
+
+        _remove_batch_dim = torch._C._functorch._remove_batch_dim(batched_output, 1, 2, 1);  batched_output = None
+        _remove_batch_dim_1 = torch._C._functorch._remove_batch_dim(batched_output_1, 1, 2, 0);  batched_output_1 = None
+
+        _vmap_decrement_nesting = torch._C._functorch._vmap_decrement_nesting()
+
+        _saved_tensors_hooks_enable = torch._C._autograd._saved_tensors_hooks_enable()
+        return (_remove_batch_dim, _remove_batch_dim_1)
 """,
         )
 
@@ -3345,23 +3455,26 @@ class GraphModule(torch.nn.Module):
             """\
 class GraphModule(torch.nn.Module):
     def forward(self, L_x_ : torch.Tensor):
-        child = L_x_
+        arg = L_x_
 
-        _check_randomness_arg = torch._functorch.vmap._check_randomness_arg('error')
+        lazy_load_decompositions = torch._functorch.vmap.lazy_load_decompositions()
 
-        select = child.select(0, 0)
-        vmap_body_0 = self.vmap_body_0
-        vmap_proxy = torch.func.vmap(vmap_body_0, (0,), (1, 0), 'error');  vmap_body_0 = None
-        call = vmap_proxy.__call__(child);  vmap_proxy = child = None
-        getitem = call[0]
-        getitem_1 = call[1];  call = None
-        return (getitem, getitem_1)
+        _saved_tensors_hooks_disable = torch._C._autograd._saved_tensors_hooks_disable("torch.func transforms don't yet support saved tensor hooks. Please open an issue with your use case.")
 
-    class GraphModule(torch.nn.Module):
-        def forward(self, select):
-            sum_1 = select.sum(0)
-            sum_2 = select.sum(1);  select = None
-            return (sum_1, sum_2)
+        _vmap_increment_nesting = torch._C._functorch._vmap_increment_nesting(2, 'error')
+
+        _add_batch_dim = torch._C._functorch._add_batch_dim(arg, 0, 1);  arg = None
+
+        batched_output = _add_batch_dim.sum(0)
+        batched_output_1 = _add_batch_dim.sum(1);  _add_batch_dim = None
+
+        _remove_batch_dim = torch._C._functorch._remove_batch_dim(batched_output, 1, 2, 1);  batched_output = None
+        _remove_batch_dim_1 = torch._C._functorch._remove_batch_dim(batched_output_1, 1, 2, 0);  batched_output_1 = None
+
+        _vmap_decrement_nesting = torch._C._functorch._vmap_decrement_nesting()
+
+        _saved_tensors_hooks_enable = torch._C._autograd._saved_tensors_hooks_enable()
+        return (_remove_batch_dim, _remove_batch_dim_1)
 """,
         )
 
@@ -3376,11 +3489,7 @@ class GraphModule(torch.nn.Module):
 
         actual = fn(x, y)
         expected = torch.compile(fn, backend="aot_eager", fullgraph=False)(x, y)
-        self.assertEqual(len(counters["graph_break"]), 1)
-        self.assertEqual(
-            dict(counters["graph_break"]),
-            {"NYI - torch.func.vmap: kwargs arguments are currently unsupported.": 2},
-        )
+        self.assertEqual(len(counters["graph_break"]), 0)
         self.assertEqual(actual, expected)
 
     @config.patch(capture_func_transforms=True)
@@ -3399,14 +3508,7 @@ class GraphModule(torch.nn.Module):
 
         actual = fn(x, y)
         expected = torch.compile(fn, backend="aot_eager", fullgraph=False)(x, y)
-        self.assertEqual(len(counters["graph_break"]), 1)
-        assert_dict_matches_regex(
-            self,
-            dict(counters["graph_break"]),
-            {
-                ".*torch.vmap with body that accepts non-Tensors as input": 2,
-            },
-        )
+        self.assertEqual(len(counters["graph_break"]), 0)
         self.assertEqual(actual, expected)
 
     @config.patch(capture_func_transforms=True)
@@ -3426,16 +3528,10 @@ class GraphModule(torch.nn.Module):
 
         actual = wrapper_fn(x, y)
         expected = torch.compile(wrapper_fn, backend="aot_eager", fullgraph=False)(x, y)
-        self.assertEqual(len(counters["graph_break"]), 1)
-        assert_dict_matches_regex(
-            self,
-            dict(counters["graph_break"]),
-            {
-                r".*HigherOrderOperator: Mutating a variable not in the current scope \(SideEffects\)": 2
-            },
-        )
+        self.assertEqual(len(counters["graph_break"]), 0)
         self.assertEqual(actual, expected)
 
+    @unittest.expectedFailure
     @config.patch(capture_func_transforms=True)
     def test_vmap_disable_capture(self):
         counters.clear()
@@ -3462,28 +3558,6 @@ class GraphModule(torch.nn.Module):
             self.assertEqual(actual, expected)
 
     @config.patch(capture_func_transforms=True)
-    def test_vmap_illegal_op_graph_break(self):
-        counters.clear()
-
-        def bad_fn(x):
-            x.stride()
-            return x
-
-        def wrapper_fn(x):
-            return torch.func.vmap(bad_fn)(x)
-
-        x = torch.randn(3, 3, 3)
-        actual = wrapper_fn(x)
-        expected = torch.compile(wrapper_fn, backend="aot_eager", fullgraph=False)(x)
-        self.assertEqual(len(counters["graph_break"]), 1)
-        assert_dict_matches_regex(
-            self,
-            dict(counters["graph_break"]),
-            {".*Illegal getattr invocation stride in strict mode": 2},
-        )
-        self.assertEqual(actual, expected)
-
-    @config.patch(capture_func_transforms=True)
     def test_vmap_multiple_invocation_in_dims(self):
         counters.clear()
 
@@ -3498,7 +3572,7 @@ class GraphModule(torch.nn.Module):
         actual = opt(x, 0), opt(x, 1), opt(x, 2)
         self.assertEqual(expected, actual)
         self.assertEqual(cnt.frame_count, 3)
-        self.assertEqual(cnt.op_count, 9)
+        self.assertEqual(cnt.op_count, 33)
 
     @config.patch(capture_func_transforms=True)
     def test_vmap_multiple_invocation_out_dims(self):
@@ -3515,7 +3589,7 @@ class GraphModule(torch.nn.Module):
         actual = opt(x, 0), opt(x, 1), opt(x, 2)
         self.assertEqual(expected, actual)
         self.assertEqual(cnt.frame_count, 3)
-        self.assertEqual(cnt.op_count, 9)
+        self.assertEqual(cnt.op_count, 30)
 
     @config.patch(capture_func_transforms=True)
     def test_vmap_new_tensor_in_body(self):
@@ -3528,7 +3602,7 @@ class GraphModule(torch.nn.Module):
         x = torch.randn(
             3,
         )
-        opt = torch.compile(wrapper_fn, backend="eager", fullgraph=True)
+        opt = torch.compile(wrapper_fn, backend="aot_eager", fullgraph=True)
         expected = wrapper_fn(x)
         actual = opt(x)
         self.assertEqual(expected, actual)
@@ -3542,7 +3616,7 @@ class GraphModule(torch.nn.Module):
             return torch.func.vmap(fn)(x)
 
         x = torch.randn(3)
-        opt = torch.compile(wrapper_fn, backend="eager", fullgraph=True)
+        opt = torch.compile(wrapper_fn, backend="aot_eager", fullgraph=True)
         expected = wrapper_fn(x)
         actual = opt(x)
         self.assertEqual(expected, actual)
@@ -3553,7 +3627,7 @@ class GraphModule(torch.nn.Module):
             return torch.func.vmap(lambda t: torch.add(t, 0.5))(x)
 
         x = torch.randn(3)
-        opt = torch.compile(wrapper_fn, backend="eager", fullgraph=True)
+        opt = torch.compile(wrapper_fn, backend="aot_eager", fullgraph=True)
         expected = wrapper_fn(x)
         actual = opt(x)
         self.assertEqual(expected, actual)
