@@ -87,12 +87,11 @@ def post_grad_passes(gm: torch.fx.GraphModule, is_inference: bool):
         group_batch_fusion_passes(gm.graph, pre_grad=False)
         print_graph(gm.graph, "After group batch fusion in post grad pass.")
         remove_noop_ops(gm.graph)
-        print_graph(gm.graph, "Before split cat in post grad pass.")
         for patterns in pass_patterns:
             patterns.apply(gm.graph)
             print_graph(
                 gm.graph,
-                "Apply split cat pattern matcher PatternMatcherPass in post grad.",
+                "Apply pattern matcher PatternMatcherPass in post grad.",
             )
         if is_inference:
             inference_patterns.apply(gm.graph)
